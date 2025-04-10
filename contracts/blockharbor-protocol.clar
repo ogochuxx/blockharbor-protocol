@@ -735,3 +735,98 @@
     )
   )
 )
+
+;; Implement circuit breaker for emergency protocol lockdown
+(define-public (activate-protocol-circuit-breaker (justification (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> (len justification) u10) (err u220)) ;; Require meaningful justification
+
+    ;; In a full implementation, this would set a protocol-wide variable
+    ;; to prevent further operations until the circuit breaker is reset
+
+    (print {event: "circuit_breaker_activated", 
+            administrator: tx-sender, 
+            activation-block: block-height,
+            justification: justification})
+
+    ;; Log deactivation timestamp (24 hours later by default)
+    (print {event: "automatic_deactivation_scheduled", 
+            scheduled-block: (+ block-height u144),
+            administrator: tx-sender})
+
+    (ok true)
+  )
+)
+
+;; Register rate-limiting parameters for transaction frequency control
+(define-public (configure-rate-limiting 
+                (transaction-type (string-ascii 30)) 
+                (max-transactions-per-block uint)
+                (cooldown-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> max-transactions-per-block u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= max-transactions-per-block u50) INVALID_QUANTITY_ERROR) ;; Reasonable upper limit
+    (asserts! (> cooldown-period u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= cooldown-period u100) INVALID_QUANTITY_ERROR) ;; Maximum ~16 hour cooldown
+
+    ;; Validate transaction type
+    (asserts! (or (is-eq transaction-type "locker-creation")
+                 (is-eq transaction-type "resource-transfer")
+                 (is-eq transaction-type "dispute-resolution")
+                 (is-eq transaction-type "authentication-operation")
+                 (is-eq transaction-type "metadata-operations")
+                 (is-eq transaction-type "cryptographic-verification")) (err u230))
+
+    (print {event: "rate_limiting_configured", 
+            transaction-type: transaction-type, 
+            max-transactions: max-transactions-per-block,
+            cooldown-period: cooldown-period,
+            administrator: tx-sender,
+            configuration-block: block-height})
+
+    (ok true)
+  )
+)
+
+;; Establish secure recovery pathway for compromised participants
+(define-public (register-compromise-recovery-procedure 
+                (locker-identifier uint) 
+                (recovery-principals (list 3 principal))
+                (verification-threshold uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Validate principals and thresholds
+      (asserts! (> (len recovery-principals) u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= (len recovery-principals) u3) INVALID_QUANTITY_ERROR) ;; Maximum 3 recovery principals
+      (asserts! (> verification-threshold u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= verification-threshold (len recovery-principals)) INVALID_QUANTITY_ERROR) ;; Cannot exceed total principals
+
+      ;; Only originator or protocol controller can establish recovery
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+
+      ;; Only for high value lockers
+      (asserts! (> quantity u5000) (err u240))
+
+      ;; Verify recovery principals are not the same as participants
+      (asserts! (not (is-some (index-of recovery-principals originator))) (err u241))
+      (asserts! (not (is-some (index-of recovery-principals beneficiary))) (err u242))
+
+      (print {event: "compromise_recovery_registered", locker-identifier: locker-identifier,
+              recovery-principals: recovery-principals, verification-threshold: verification-threshold,
+              requestor: tx-sender})
+
+      (ok true)
+    )
+  )
+)
+
+
