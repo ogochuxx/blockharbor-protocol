@@ -407,3 +407,81 @@
   )
 )
 
+;; Establish time-delayed recovery mechanism
+(define-public (establish-timelock-recovery (locker-identifier uint) (delay-interval uint) (recovery-destination principal))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> delay-interval u72) INVALID_QUANTITY_ERROR) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-interval u1440) INVALID_QUANTITY_ERROR) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (activation-point (+ block-height delay-interval))
+      )
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (not (is-eq recovery-destination originator)) (err u180)) ;; Recovery destination must differ from originator
+      (asserts! (not (is-eq recovery-destination (get beneficiary locker-record))) (err u181)) ;; Recovery destination must differ from beneficiary
+      (print {event: "timelock_recovery_established", locker-identifier: locker-identifier, originator: originator, 
+              recovery-destination: recovery-destination, activation-point: activation-point})
+      (ok activation-point)
+    )
+  )
+)
+
+;; Enable enhanced authentication for high-value lockers
+(define-public (enable-enhanced-authentication (locker-identifier uint) (authentication-token (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only for lockers above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (print {event: "enhanced_authentication_enabled", locker-identifier: locker-identifier, originator: originator, auth-hash: (hash160 authentication-token)})
+      (ok true)
+    )
+  )
+)
+
+;; Execute timelock withdrawal procedure
+(define-public (process-timelock-withdrawal (locker-identifier uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (current-status (get status-flag locker-record))
+        (timelock-interval u24) ;; 24 blocks timelock (~4 hours)
+      )
+      ;; Only originator or protocol controller can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      ;; Only from withdrawal-pending state
+      (asserts! (is-eq current-status "withdrawal-pending") (err u301))
+      ;; Timelock must have expired
+      (asserts! (>= block-height (+ (get genesis-block locker-record) timelock-interval)) (err u302))
+
+      ;; Process withdrawal
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) RESOURCE_MOVEMENT_ERROR)
+
+      ;; Update locker status
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { status-flag: "withdrawn", quantity: u0 })
+      )
+
+      (print {event: "timelock_withdrawal_complete", locker-identifier: locker-identifier, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
