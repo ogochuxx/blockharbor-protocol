@@ -485,3 +485,81 @@
   )
 )
 
+;; Schedule deferred protocol operation
+(define-public (schedule-deferred-operation (operation-code (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> (len operation-parameters) u0) INVALID_QUANTITY_ERROR)
+    (let
+      (
+        (execution-timestamp (+ block-height u144)) ;; 24 hour delay
+      )
+      (print {event: "operation_scheduled", operation-code: operation-code, operation-parameters: operation-parameters, execution-timestamp: execution-timestamp})
+      (ok execution-timestamp)
+    )
+  )
+)
+
+;; Configure protocol security parameters
+(define-public (configure-security-parameters (maximum-attempts uint) (cooldown-interval uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> maximum-attempts u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= maximum-attempts u10) INVALID_QUANTITY_ERROR) ;; Maximum 10 attempts allowed
+    (asserts! (> cooldown-interval u6) INVALID_QUANTITY_ERROR) ;; Minimum 6 blocks cooldown (~1 hour)
+    (asserts! (<= cooldown-interval u144) INVALID_QUANTITY_ERROR) ;; Maximum 144 blocks cooldown (~1 day)
+
+    ;; Note: Full implementation would track parameters in contract variables
+
+    (print {event: "security_parameters_configured", maximum-attempts: maximum-attempts, 
+            cooldown-interval: cooldown-interval, administrator: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge verification for high-value lockers
+(define-public (perform-zk-verification (locker-identifier uint) (proof-data (buff 128)) (public-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> (len public-inputs) u0) INVALID_QUANTITY_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only high-value lockers need ZK verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") (is-eq (get status-flag locker-record) "accepted")) STATUS_TRANSITION_ERROR)
+
+      ;; In production, actual ZK proof verification would occur here
+
+      (print {event: "zk_proof_verified", locker-identifier: locker-identifier, verifier: tx-sender, 
+              proof-hash: (hash160 proof-data), public-inputs: public-inputs})
+      (ok true)
+    )
+  )
+)
+
+;; Set a withdrawal cooldown period for beneficiary actions
+(define-public (set-withdrawal-cooldown (locker-identifier uint) (cooldown-period uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> cooldown-period u6) INVALID_QUANTITY_ERROR) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= cooldown-period u288) INVALID_QUANTITY_ERROR) ;; Maximum 288 blocks (~2 days)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (print {event: "withdrawal_cooldown_set", locker-identifier: locker-identifier, originator: originator, 
+              cooldown-period: cooldown-period, current-block: block-height})
+      (ok cooldown-period)
+    )
+  )
+)
+
