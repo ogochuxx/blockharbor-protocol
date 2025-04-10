@@ -327,3 +327,83 @@
   )
 )
 
+;; Create multi-phase resource allocation
+(define-public (establish-phased-allocation (beneficiary principal) (resource-type uint) (quantity uint) (allocation-phases uint))
+  (let 
+    (
+      (next-identifier (+ (var-get locker-sequence) u1))
+      (termination-point (+ block-height LOCKER_LIFECYCLE_SPAN))
+      (allocation-amount (/ quantity allocation-phases))
+    )
+    (asserts! (> quantity u0) INVALID_QUANTITY_ERROR)
+    (asserts! (> allocation-phases u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= allocation-phases u5) INVALID_QUANTITY_ERROR) ;; Maximum 5 phases
+    (asserts! (verify-beneficiary-eligibility beneficiary) ORIGINATOR_MISMATCH_ERROR)
+    (asserts! (is-eq (* allocation-amount allocation-phases) quantity) (err u121)) ;; Must divide evenly
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set locker-sequence next-identifier)
+          (print {event: "phased_allocation_established", locker-identifier: next-identifier, originator: tx-sender, beneficiary: beneficiary, 
+                  resource-type: resource-type, quantity: quantity, phases: allocation-phases, phase-amount: allocation-amount})
+          (ok next-identifier)
+        )
+      error RESOURCE_MOVEMENT_ERROR
+    )
+  )
+)
+
+;; Cryptographic transaction verification
+(define-public (cryptographically-verify-transaction (locker-identifier uint) (message-digest (buff 32)) (signature (buff 65)) (signing-entity principal))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (recover-result (unwrap! (secp256k1-recover? message-digest signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq signing-entity originator) (is-eq signing-entity beneficiary)) (err u151))
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+
+      ;; Verify signature matches expected signer
+      (asserts! (is-eq (unwrap! (principal-of? recover-result) (err u152)) signing-entity) (err u153))
+
+      (print {event: "cryptographic_verification_complete", locker-identifier: locker-identifier, verifier: tx-sender, signing-entity: signing-entity})
+      (ok true)
+    )
+  )
+)
+
+;; Attach metadata to locker
+(define-public (attach-metadata-record (locker-identifier uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      ;; Only authorized entities can attach metadata
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u160))
+      (asserts! (not (is-eq (get status-flag locker-record) "returned")) (err u161))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u162))
+
+      ;; Validate metadata categories
+      (asserts! (or (is-eq metadata-category "resource-details") 
+                   (is-eq metadata-category "transfer-evidence")
+                   (is-eq metadata-category "quality-verification")
+                   (is-eq metadata-category "originator-specifications")) (err u163))
+
+      (print {event: "metadata_record_attached", locker-identifier: locker-identifier, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
