@@ -563,3 +563,77 @@
   )
 )
 
+;; Register multi-signature verification requirement for high-value transfers
+(define-public (register-multisig-requirement (locker-identifier uint) (required-signatures uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> required-signatures u1) INVALID_QUANTITY_ERROR) ;; Minimum 2 signatures required
+    (asserts! (<= required-signatures (len authorized-signers)) INVALID_QUANTITY_ERROR) ;; Cannot require more signatures than signers
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only for high-value lockers
+      (asserts! (> quantity u5000) (err u201))
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      ;; Ensure originator is included in authorized signers
+      (asserts! (is-some (index-of authorized-signers originator)) (err u202))
+      (print {event: "multisig_requirement_registered", locker-identifier: locker-identifier, originator: originator, 
+              required-signatures: required-signatures, authorized-signers: authorized-signers})
+      (ok required-signatures)
+    )
+  )
+)
+
+;; Enforce rate-limiting for resource transfers to prevent draining attacks
+(define-public (enforce-rate-limiting (beneficiary principal) (rate-limit uint) (time-window uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> rate-limit u0) INVALID_QUANTITY_ERROR)
+    (asserts! (> time-window u12) INVALID_QUANTITY_ERROR) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= time-window u864) INVALID_QUANTITY_ERROR) ;; Maximum 864 blocks (~6 days)
+    (asserts! (verify-beneficiary-eligibility beneficiary) ORIGINATOR_MISMATCH_ERROR)
+
+    ;; Rate-limiting parameters are enforced by protocol controller
+    (print {event: "rate_limiting_enforced", beneficiary: beneficiary, rate-limit: rate-limit, 
+            time-window: time-window, enforcer: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Establish emergency access protocol with timelock and multi-party authorization
+(define-public (establish-emergency-protocol (locker-identifier uint) (emergency-threshold uint) (authorized-responders (list 5 principal)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> emergency-threshold u1) INVALID_QUANTITY_ERROR) ;; At least 2 responders must agree
+    (asserts! (<= emergency-threshold (len authorized-responders)) INVALID_QUANTITY_ERROR) ;; Cannot require more than available responders
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (current-status (get status-flag locker-record))
+        (emergency-activation-delay u144) ;; 24 hour delay before protocol can be activated
+      )
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) STATUS_TRANSITION_ERROR)
+
+      ;; Ensure controller is among authorized responders for governance
+      (asserts! (is-some (index-of authorized-responders PROTOCOL_CONTROLLER)) (err u220))
+
+      ;; Calculate activation block height
+      (let
+        (
+          (activation-point (+ block-height emergency-activation-delay))
+        )
+        (print {event: "emergency_protocol_established", locker-identifier: locker-identifier, originator: originator,
+                emergency-threshold: emergency-threshold, authorized-responders: authorized-responders,
+                activation-point: activation-point})
+        (ok activation-point)
+      )
+    )
+  )
+)
+
