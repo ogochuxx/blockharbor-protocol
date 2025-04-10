@@ -248,4 +248,82 @@
   )
 )
 
+;; Adjudicate contested locker
+(define-public (adjudicate-contested-locker (locker-identifier uint) (originator-allocation uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (<= originator-allocation u100) INVALID_QUANTITY_ERROR) ;; Must be percentage 0-100
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (quantity (get quantity locker-record))
+        (originator-share (/ (* quantity originator-allocation) u100))
+        (beneficiary-share (- quantity originator-share))
+      )
+      (asserts! (is-eq (get status-flag locker-record) "disputed") (err u112)) ;; Must be in disputed state
+      (asserts! (<= block-height (get termination-block locker-record)) LIFECYCLE_EXPIRY_ERROR)
+
+      ;; Distribute originator's share
+      (unwrap! (as-contract (stx-transfer? originator-share tx-sender originator)) RESOURCE_MOVEMENT_ERROR)
+
+      ;; Distribute beneficiary's share
+      (unwrap! (as-contract (stx-transfer? beneficiary-share tx-sender beneficiary)) RESOURCE_MOVEMENT_ERROR)
+
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { status-flag: "resolved" })
+      )
+      (print {event: "contest_adjudicated", locker-identifier: locker-identifier, originator: originator, beneficiary: beneficiary, 
+              originator-share: originator-share, beneficiary-share: beneficiary-share, originator-allocation: originator-allocation})
+      (ok true)
+    )
+  )
+)
+
+;; Register additional oversight for high-value lockers
+(define-public (register-additional-oversight (locker-identifier uint) (oversight-authority principal))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only for high-value lockers (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (print {event: "oversight_registered", locker-identifier: locker-identifier, oversight-authority: oversight-authority, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend anomalous locker
+(define-public (suspend-anomalous-locker (locker-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")) 
+                STATUS_TRANSITION_ERROR)
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { status-flag: "frozen" })
+      )
+      (print {event: "locker_suspended", locker-identifier: locker-identifier, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
 
