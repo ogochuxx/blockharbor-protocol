@@ -37,3 +37,126 @@
   (<= locker-identifier (var-get locker-sequence))
 )
 
+(define-private (verify-beneficiary-eligibility (target-beneficiary principal))
+  (and 
+    (not (is-eq target-beneficiary tx-sender))
+    (not (is-eq target-beneficiary (as-contract tx-sender)))
+  )
+)
+
+;; Protocol operations
+
+;; Finalize resource transfer to beneficiary
+(define-public (execute-locker-transfer (locker-identifier uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (beneficiary (get beneficiary locker-record))
+        (quantity (get quantity locker-record))
+        (resource-type (get resource-type locker-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender (get originator locker-record))) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (<= block-height (get termination-block locker-record)) LIFECYCLE_EXPIRY_ERROR)
+      (match (as-contract (stx-transfer? quantity tx-sender beneficiary))
+        success
+          (begin
+            (map-set LockerRepository
+              { locker-identifier: locker-identifier }
+              (merge locker-record { status-flag: "completed" })
+            )
+            (print {event: "transfer_executed", locker-identifier: locker-identifier, beneficiary: beneficiary, resource-type: resource-type, quantity: quantity})
+            (ok true)
+          )
+        error RESOURCE_MOVEMENT_ERROR
+      )
+    )
+  )
+)
+
+;; Repatriate resources to originator
+(define-public (repatriate-resources (locker-identifier uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set LockerRepository
+              { locker-identifier: locker-identifier }
+              (merge locker-record { status-flag: "returned" })
+            )
+            (print {event: "resources_repatriated", locker-identifier: locker-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error RESOURCE_MOVEMENT_ERROR
+      )
+    )
+  )
+)
+
+;; Originator-initiated termination
+(define-public (terminate-locker (locker-identifier uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (<= block-height (get termination-block locker-record)) LIFECYCLE_EXPIRY_ERROR)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set LockerRepository
+              { locker-identifier: locker-identifier }
+              (merge locker-record { status-flag: "cancelled" })
+            )
+            (print {event: "locker_terminated", locker-identifier: locker-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error RESOURCE_MOVEMENT_ERROR
+      )
+    )
+  )
+)
+
+;; Prolong locker lifecycle
+(define-public (prolong-locker-lifecycle (locker-identifier uint) (additional-blocks uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> additional-blocks u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= additional-blocks u1440) INVALID_QUANTITY_ERROR) ;; Maximum extension ~10 days
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record)) 
+        (beneficiary (get beneficiary locker-record))
+        (current-termination (get termination-block locker-record))
+        (new-termination (+ current-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") (is-eq (get status-flag locker-record) "accepted")) STATUS_TRANSITION_ERROR)
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { termination-block: new-termination })
+      )
+      (print {event: "lifecycle_prolonged", locker-identifier: locker-identifier, requestor: tx-sender, new-termination-block: new-termination})
+      (ok true)
+    )
+  )
+)
+
+
