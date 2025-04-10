@@ -830,3 +830,89 @@
 )
 
 
+;; Implement resource throttling for abnormal transaction patterns
+(define-public (enforce-resource-throttling 
+                (transaction-pattern-hash (buff 32)) 
+                (risk-assessment-level uint)
+                (throttling-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> risk-assessment-level u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= risk-assessment-level u5) INVALID_QUANTITY_ERROR) ;; Scale from 1-5
+    (asserts! (> throttling-duration u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= throttling-duration u1440) INVALID_QUANTITY_ERROR) ;; Maximum ~10 days
+
+    ;; Calculate resource limits based on risk level
+    (let
+      (
+        (transaction-limit (- u100 (* risk-assessment-level u15))) ;; Higher risk = lower limit
+        (cooldown-blocks (* risk-assessment-level u12)) ;; Higher risk = longer cooldown
+        (expiration-block (+ block-height throttling-duration))
+      )
+
+      (print {event: "resource_throttling_activated", 
+              transaction-pattern: transaction-pattern-hash,
+              risk-level: risk-assessment-level,
+              transaction-limit: transaction-limit,
+              cooldown-blocks: cooldown-blocks,
+              expiration-block: expiration-block,
+              administrator: tx-sender})
+
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Register multi-signature authorization requirement
+(define-public (register-multisig-authorization (locker-identifier uint) (required-signatures uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> required-signatures u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= required-signatures (len authorized-signers)) INVALID_QUANTITY_ERROR) ;; Can't require more signatures than signers
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only protocol controller or originator can set multisig
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      ;; Only pending lockers can have multisig added
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      ;; Minimum quantity threshold for multi-signature requirement
+      (asserts! (> quantity u1000) (err u200))
+
+      (print {event: "multisig_authorization_registered", locker-identifier: locker-identifier, originator: originator, 
+              required-signatures: required-signatures, authorized-signers: authorized-signers})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate-limiting for resource access
+(define-public (configure-resource-rate-limiting (locker-identifier uint) (max-operations-per-interval uint) (interval-blocks uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> max-operations-per-interval u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= max-operations-per-interval u20) INVALID_QUANTITY_ERROR) ;; Maximum 20 operations per interval
+    (asserts! (>= interval-blocks u6) INVALID_QUANTITY_ERROR) ;; Minimum 6 blocks interval (~1 hour)
+    (asserts! (<= interval-blocks u144) INVALID_QUANTITY_ERROR) ;; Maximum 144 blocks interval (~1 day)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      ;; Only protocol controller, originator or beneficiary can configure rate limiting
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      ;; Can't configure rate limiting for completed lockers
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u210))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u211))
+
+      (print {event: "rate_limiting_configured", locker-identifier: locker-identifier, configurator: tx-sender, 
+              max-operations: max-operations-per-interval, interval-blocks: interval-blocks})
+      (ok true)
+    )
+  )
+)
+
