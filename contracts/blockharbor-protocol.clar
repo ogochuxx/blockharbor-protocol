@@ -637,3 +637,101 @@
   )
 )
 
+
+;; Register transaction verification oracle for cross-chain validations
+(define-public (register-verification-oracle (locker-identifier uint) (oracle-address principal) (verification-mechanism (string-ascii 30)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only protocol controller can register oracles
+      (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+
+      ;; Only for higher value transactions
+      (asserts! (> quantity u2000) (err u230))
+
+      ;; Oracle cannot be the same as originator or beneficiary
+      (asserts! (not (is-eq oracle-address originator)) (err u231))
+      (asserts! (not (is-eq oracle-address (get beneficiary locker-record))) (err u232))
+
+      ;; Validate verification mechanisms
+      (asserts! (or (is-eq verification-mechanism "threshold-signature")
+                   (is-eq verification-mechanism "merkle-proof")
+                   (is-eq verification-mechanism "zero-knowledge")
+                   (is-eq verification-mechanism "multi-party-computation")) (err u233))
+
+      (print {event: "verification_oracle_registered", locker-identifier: locker-identifier, oracle-address: oracle-address,
+              verification-mechanism: verification-mechanism, registrar: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Register security audit authorization for critical operations
+(define-public (register-security-audit-authorization 
+                (locker-identifier uint) 
+                (auditor-principal principal) 
+                (authorization-digest (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender originator)) ADMIN_ONLY_ERROR)
+      (asserts! (> quantity u1000) (err u200)) ;; Only high-value lockers require security audit
+      (asserts! (not (is-eq auditor-principal originator)) (err u201)) ;; Auditor must be different from originator
+      (asserts! (not (is-eq auditor-principal (get beneficiary locker-record))) (err u202)) ;; Auditor must be different from beneficiary
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+
+      (print {event: "security_audit_registered", locker-identifier: locker-identifier, 
+              auditor: auditor-principal, authorization-hash: authorization-digest, 
+              requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Implement multi-signature authorization requirement for high-risk operations
+(define-public (authorize-multi-signature-operation 
+                (locker-identifier uint) 
+                (operation-type (string-ascii 20)) 
+                (authorization-signature (buff 65)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Validate operation type
+      (asserts! (or (is-eq operation-type "resource-transfer") 
+                   (is-eq operation-type "termination")
+                   (is-eq operation-type "emergency-override")
+                   (is-eq operation-type "beneficiary-change")) (err u210))
+
+      ;; Only authorized participants can submit signatures
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary) 
+                   (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+
+      ;; Only for active lockers
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")
+                   (is-eq (get status-flag locker-record) "disputed")) STATUS_TRANSITION_ERROR)
+
+      (print {event: "multi_signature_authorization", locker-identifier: locker-identifier, 
+              operation-type: operation-type, signer: tx-sender, 
+              signature-hash: (hash160 authorization-signature)})
+      (ok true)
+    )
+  )
+)
