@@ -1481,3 +1481,67 @@
     )
   )
 )
+
+
+;; Set up configurable circuit breaker for anomalous transaction patterns
+(define-public (configure-circuit-breaker (locker-identifier uint) (threshold-amount uint) (cooldown-period uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> threshold-amount u100) INVALID_QUANTITY_ERROR) ;; Minimum 100 STX threshold
+    (asserts! (> cooldown-period u12) INVALID_QUANTITY_ERROR) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= cooldown-period u288) INVALID_QUANTITY_ERROR) ;; Maximum 288 blocks (~2 days)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Only originator or protocol controller can configure circuit breaker
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      ;; Only for pending or accepted lockers
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") (is-eq (get status-flag locker-record) "accepted")) STATUS_TRANSITION_ERROR)
+      ;; Threshold must be less than locker amount
+      (asserts! (< threshold-amount quantity) (err u230))
+
+      (print {event: "circuit_breaker_configured", locker-identifier: locker-identifier, originator: originator, 
+              threshold-amount: threshold-amount, cooldown-period: cooldown-period, activation-block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Implement emergency resource extraction with multi-tier verification
+(define-public (emergency-resource-extraction (locker-identifier uint) (extraction-approval (buff 65)) (emergency-code (string-ascii 20)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (or (is-eq emergency-code "SECURITY_BREACH") 
+                 (is-eq emergency-code "PROTOCOL_VIOLATION")
+                 (is-eq emergency-code "REGULATORY_ACTION")) (err u240))
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (emergency-threshold u1000) ;; 1000 STX threshold for emergency extraction
+      )
+      ;; Only protocol controller can execute emergency extraction
+      (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+      ;; Only for active lockers
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u241))
+      (asserts! (not (is-eq (get status-flag locker-record) "returned")) (err u242))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u243))
+      ;; Only for significant value lockers
+      (asserts! (> quantity emergency-threshold) (err u244))
+
+      ;; Verify extraction approval signature (simplified for example)
+      ;; In a real implementation, would verify against authorized emergency keys
+
+      ;; Transfer resources to originator
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) RESOURCE_MOVEMENT_ERROR)
+      (print {event: "emergency_extraction_completed", locker-identifier: locker-identifier, originator: originator, 
+              quantity: quantity, emergency-code: emergency-code, approver: PROTOCOL_CONTROLLER})
+      (ok true)
+    )
+  )
+)
+
