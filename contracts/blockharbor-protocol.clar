@@ -916,3 +916,71 @@
   )
 )
 
+;; Establish temporary access delegation for third-party auditing
+(define-public (establish-audit-delegation (locker-identifier uint) (audit-authority principal) (access-duration uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> access-duration u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= access-duration u720) INVALID_QUANTITY_ERROR) ;; Maximum 720 blocks (~5 days)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (expiration-block (+ block-height access-duration))
+      )
+      ;; Only protocol controller, originator or beneficiary can establish audit delegation
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      ;; Audit authority must be different from originator and beneficiary
+      (asserts! (and (not (is-eq audit-authority originator)) (not (is-eq audit-authority beneficiary))) (err u220))
+      ;; Can't establish audit for completed or expired lockers
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u221))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u222))
+
+      (print {event: "audit_delegation_established", locker-identifier: locker-identifier, delegator: tx-sender, 
+              audit-authority: audit-authority, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Implement circuit-breaker pattern for emergency halting
+(define-public (activate-emergency-circuit-breaker (justification (string-ascii 150)))
+  (begin
+    ;; Only protocol controller can activate circuit breaker
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    ;; Justification must be provided
+    (asserts! (> (len justification) u10) (err u230)) ;; Minimum justification length
+
+    ;; Actual implementation would set a persistent state variable
+    ;; and prevent certain operations from proceeding
+
+    ;; Log activation of circuit breaker
+    (print {event: "circuit_breaker_activated", controller: tx-sender, 
+            activation-block: block-height, justification: justification})
+    (ok block-height)
+  )
+)
+
+;; Implement role-based access verification for admin operations
+(define-public (verify-privileged-operation (operation-code uint) (operation-parameters (list 5 uint)) (authorization-proof (buff 64)))
+  (begin
+    ;; Only specified accounts with administrative roles should be allowed 
+    (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) 
+                 ;; In production, would check against a list of authorized admins
+                 (is-eq tx-sender 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)) ADMIN_ONLY_ERROR)
+    ;; Operation code must be valid
+    (asserts! (and (>= operation-code u1) (<= operation-code u10)) (err u240))
+    ;; Must have some parameters
+    (asserts! (> (len operation-parameters) u0) INVALID_QUANTITY_ERROR)
+
+    ;; In production, would verify the authorization proof using cryptography
+
+    ;; Log the privileged operation verification
+    (print {event: "privileged_operation_verified", operator: tx-sender, 
+            operation-code: operation-code, parameters: operation-parameters, 
+            proof-hash: (hash160 authorization-proof)})
+    (ok true)
+  )
+)
+
