@@ -1149,3 +1149,86 @@
     )
   )
 )
+
+;; Rate limit transaction attempts per principal
+(define-public (register-rate-limit-violation (violating-principal principal) (action-type (string-ascii 20)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (not (is-eq violating-principal PROTOCOL_CONTROLLER)) (err u210)) ;; Cannot rate limit the controller
+    (let
+      (
+        (cooldown-expiry (+ block-height u144)) ;; 24-hour cooldown (~144 blocks)
+        (violation-severity u1) ;; Default violation severity
+      )
+      ;; Adjust severity based on action type
+      (asserts! (or (is-eq action-type "transfer-attempt") 
+                   (is-eq action-type "authentication-failure")
+                   (is-eq action-type "cryptographic-violation")) (err u211))
+
+      ;; Increase severity for critical violations
+      (if (is-eq action-type "cryptographic-violation")
+          (+ violation-severity u2)
+          violation-severity)
+
+      (print {event: "rate_limit_applied", violating-principal: violating-principal, action-type: action-type, 
+              cooldown-expiry: cooldown-expiry, violation-severity: violation-severity})
+      (ok cooldown-expiry)
+    )
+  )
+)
+
+;; Circuit breaker for anomalous transaction patterns
+(define-public (activate-circuit-breaker (threshold-violation-type (string-ascii 30)) (violation-metrics (list 5 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> (len violation-metrics) u0) INVALID_QUANTITY_ERROR)
+    (let
+      (
+        (circuit-activated-until (+ block-height u72)) ;; 12-hour circuit break (~72 blocks)
+        (breach-level (unwrap! (element-at violation-metrics u0) INVALID_QUANTITY_ERROR))
+      )
+      ;; Validate threshold violation type
+      (asserts! (or (is-eq threshold-violation-type "transaction-volume") 
+                   (is-eq threshold-violation-type "failure-rate")
+                   (is-eq threshold-violation-type "resource-concentration")
+                   (is-eq threshold-violation-type "rapid-state-changes")) (err u220))
+
+      ;; Higher breach levels increase circuit break duration
+      (if (> breach-level u75) 
+          (+ circuit-activated-until u72)  ;; Add another 12 hours for severe breaches
+          circuit-activated-until)
+
+      (print {event: "circuit_breaker_activated", threshold-violation-type: threshold-violation-type, 
+              breach-level: breach-level, active-until: circuit-activated-until, violation-metrics: violation-metrics})
+      (ok circuit-activated-until)
+    )
+  )
+)
+
+;; Cryptographic challenge-response verification
+(define-public (verify-challenge-response (locker-identifier uint) (challenge (buff 32)) (response (buff 65)) (respondent principal))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (challenge-hash (hash160 challenge))
+        (recover-result (unwrap! (secp256k1-recover? challenge response) (err u230)))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq respondent originator) (is-eq respondent beneficiary)) (err u231))
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")
+                   (is-eq (get status-flag locker-record) "multisig-pending")) STATUS_TRANSITION_ERROR)
+
+      ;; Verify signature matches claimed respondent
+      (asserts! (is-eq (unwrap! (principal-of? recover-result) (err u232)) respondent) (err u233))
+
+      (print {event: "challenge_verified", locker-identifier: locker-identifier, challenge-hash: challenge-hash, 
+              respondent: respondent, verifier: tx-sender})
+      (ok true)
+    )
+  )
+)
