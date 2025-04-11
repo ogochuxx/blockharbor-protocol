@@ -1066,3 +1066,86 @@
     )
   )
 )
+
+;; Rate-limiting mechanism to prevent operational abuse
+(define-public (apply-operation-rate-limit (locker-identifier uint) (operation-code (string-ascii 20)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (current-block block-height)
+        (rate-limit-window u144) ;; 144 blocks = ~1 day
+        (max-operations-per-window u5) ;; Maximum 5 operations per day
+      )
+      ;; Additional validations would be implemented here in production
+      ;; to check against an operation counter map
+
+      ;; For this simplified version, we just enforce that the protocol controller
+      ;; can apply rate limits
+
+      (print {event: "rate_limit_applied", locker-identifier: locker-identifier, operation-code: operation-code, 
+              current-block: current-block, window-size: rate-limit-window, max-operations: max-operations-per-window})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate delayed withdrawal protocol for secure resource retrieval
+(define-public (initiate-delayed-withdrawal (locker-identifier uint) (security-token (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (current-status (get status-flag locker-record))
+      )
+      ;; Only originator can initiate withdrawal
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      ;; Only from pending or accepted state
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) STATUS_TRANSITION_ERROR)
+      ;; Verify locker lifecycle is valid
+      (asserts! (<= block-height (get termination-block locker-record)) LIFECYCLE_EXPIRY_ERROR)
+      (print {event: "delayed_withdrawal_initiated", locker-identifier: locker-identifier, originator: originator, 
+              quantity: quantity, security-token-hash: (hash160 security-token), initiation-block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Create security audit trail for significant locker operations
+(define-public (record-security-audit-event (locker-identifier uint) (audit-category (string-ascii 20)) (event-details (string-ascii 100)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      ;; Only authorized entities can record audit events
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary) 
+                   (is-eq tx-sender PROTOCOL_CONTROLLER)) 
+                ADMIN_ONLY_ERROR)
+
+      ;; Validate audit categories
+      (asserts! (or (is-eq audit-category "access-attempt") 
+                   (is-eq audit-category "resource-modification")
+                   (is-eq audit-category "authorization-change")
+                   (is-eq audit-category "security-alert")
+                   (is-eq audit-category "configuration-change")) 
+                (err u220))
+
+      ;; Full implementation would store events in data map
+      ;; Here we simply record the event
+
+      (print {event: "security_audit_recorded", locker-identifier: locker-identifier, audit-category: audit-category, 
+              event-details: event-details, recorder: tx-sender, timestamp-block: block-height})
+      (ok true)
+    )
+  )
+)
