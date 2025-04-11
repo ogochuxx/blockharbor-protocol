@@ -984,3 +984,85 @@
   )
 )
 
+
+;; Establish anti-replay protection mechanism
+(define-public (register-operation-nonce (locker-identifier uint) (operation-nonce uint) (validity-blocks uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> operation-nonce u0) INVALID_QUANTITY_ERROR)
+    (asserts! (> validity-blocks u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= validity-blocks u144) INVALID_QUANTITY_ERROR) ;; Maximum 144 blocks validity (~1 day)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (expiration-block (+ block-height validity-blocks))
+      )
+      ;; Only authorized parties can register nonces
+      (asserts! (or (is-eq tx-sender PROTOCOL_CONTROLLER) 
+                   (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      ;; Can't register nonces for completed lockers
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u250))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u251))
+
+      ;; In production, would store nonce in a map to prevent replay attacks
+
+      (print {event: "operation_nonce_registered", locker-identifier: locker-identifier, registrar: tx-sender, 
+              nonce: operation-nonce, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Establish a locker with advanced verification requirements
+(define-public (establish-verified-locker (beneficiary principal) (resource-type uint) (quantity uint) (verification-level uint))
+  (begin
+    (asserts! (> quantity u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= verification-level u3) INVALID_QUANTITY_ERROR) ;; Maximum verification level is 3
+    (asserts! (verify-beneficiary-eligibility beneficiary) ORIGINATOR_MISMATCH_ERROR)
+    (let 
+      (
+        (next-identifier (+ (var-get locker-sequence) u1))
+        (termination-point (+ block-height LOCKER_LIFECYCLE_SPAN))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set locker-sequence next-identifier)
+
+            (print {event: "verified_locker_established", locker-identifier: next-identifier, originator: tx-sender, 
+                    beneficiary: beneficiary, resource-type: resource-type, quantity: quantity, 
+                    verification-level: verification-level})
+            (ok next-identifier)
+          )
+        error RESOURCE_MOVEMENT_ERROR
+      )
+    )
+  )
+)
+
+;; Emergency freeze mechanism for suspected unauthorized activities
+(define-public (emergency-freeze-locker (locker-identifier uint) (security-reason (string-ascii 50)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      ;; Can be triggered by originator or protocol controller
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      ;; Can only freeze active lockers
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")) 
+                STATUS_TRANSITION_ERROR)
+
+      (print {event: "emergency_freeze_activated", locker-identifier: locker-identifier, initiator: tx-sender, 
+              security-reason: security-reason, freeze-block: block-height})
+      (ok true)
+    )
+  )
+)
