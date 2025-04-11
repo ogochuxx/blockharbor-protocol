@@ -1393,3 +1393,91 @@
     )
   )
 )
+
+;; Implement phased withdrawal mechanism
+;; Enhances security by requiring withdrawals to happen in stages
+(define-public (establish-phased-withdrawal (locker-identifier uint) (withdrawal-phases uint) (phase-interval uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> withdrawal-phases u1) INVALID_QUANTITY_ERROR) ;; At least 2 phases
+    (asserts! (<= withdrawal-phases u5) INVALID_QUANTITY_ERROR) ;; Maximum 5 phases
+    (asserts! (> phase-interval u24) INVALID_QUANTITY_ERROR) ;; At least 4 hours between phases
+    (asserts! (<= phase-interval u144) INVALID_QUANTITY_ERROR) ;; Maximum 24 hours between phases
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (phase-amount (/ quantity withdrawal-phases))
+      )
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (> quantity u1000) (err u250)) ;; Only for substantial transfers (> 1000 STX)
+      (asserts! (is-eq (* phase-amount withdrawal-phases) quantity) (err u251)) ;; Must divide evenly
+      (print {event: "phased_withdrawal_established", locker-identifier: locker-identifier, originator: originator,
+              withdrawal-phases: withdrawal-phases, phase-interval: phase-interval, phase-amount: phase-amount})
+      (ok phase-amount)
+    )
+  )
+)
+
+;; Implement graduated release mechanism for high-value transfers
+(define-public (establish-graduated-release (locker-identifier uint) (release-percentage uint) (confirmation-blocks uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> release-percentage u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= release-percentage u50) INVALID_QUANTITY_ERROR) ;; Maximum 50% per release
+    (asserts! (> confirmation-blocks u10) INVALID_QUANTITY_ERROR) ;; Minimum 10 blocks between releases
+    (asserts! (<= confirmation-blocks u144) INVALID_QUANTITY_ERROR) ;; Maximum ~1 day between releases
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (release-amount (/ (* quantity release-percentage) u100))
+      )
+      ;; Only originator can establish graduated release
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      ;; Only for pending lockers
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      ;; Only for high-value lockers (> 5000 STX)
+      (asserts! (> quantity u5000) (err u220))
+      ;; Release amount must be significant
+      (asserts! (> release-amount u0) (err u221))
+
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { status-flag: "graduated" })
+      )
+
+      (print {event: "graduated_release_established", locker-identifier: locker-identifier, originator: originator, 
+              release-percentage: release-percentage, release-amount: release-amount, confirmation-blocks: confirmation-blocks})
+      (ok true)
+    )
+  )
+)
+
+;; Register external oracle validation service
+;; Enhances security by requiring trusted third-party confirmation
+(define-public (register-oracle-validation (locker-identifier uint) (oracle-endpoints (list 3 principal)) (validation-threshold uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR) 
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (> (len oracle-endpoints) u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= (len oracle-endpoints) u3) INVALID_QUANTITY_ERROR)
+      (asserts! (> validation-threshold u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= validation-threshold (len oracle-endpoints)) INVALID_QUANTITY_ERROR)
+      (asserts! (> quantity u5000) (err u230)) 
+      (print {event: "oracle_validation_registered", locker-identifier: locker-identifier, oracle-endpoints: oracle-endpoints,
+              validation-threshold: validation-threshold, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
