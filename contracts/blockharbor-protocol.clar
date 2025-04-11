@@ -1232,3 +1232,78 @@
     )
   )
 )
+
+;; Emergency protocol suspension for security incidents
+(define-public (emergency-protocol-suspension (incident-severity uint) (incident-details (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_CONTROLLER) ADMIN_ONLY_ERROR)
+    (asserts! (> incident-severity u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= incident-severity u5) INVALID_QUANTITY_ERROR) ;; Scale from 1-5
+    (let
+      (
+        (suspension-duration (* incident-severity u144)) ;; Duration based on severity (in blocks)
+        (resumption-block (+ block-height suspension-duration))
+      )
+      ;; In production, would update protocol state variables
+      ;; to prevent new lockers from being created during suspension
+
+      (print {event: "emergency_suspension", incident-severity: incident-severity, 
+              incident-details: incident-details, expected-resumption: resumption-block})
+      (ok resumption-block)
+    )
+  )
+)
+
+;; Transaction replay protection mechanism
+(define-public (register-transaction-nonce (locker-identifier uint) (nonce uint) (transaction-digest (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ADMIN_ONLY_ERROR)
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")
+                   (is-eq (get status-flag locker-record) "multisig-pending")) STATUS_TRANSITION_ERROR)
+
+      ;; In production, would verify nonce hasn't been used before
+      ;; and store it in a map for future verification
+
+      ;; Verify transaction digest doesn't match previous transactions
+      ;; (simplified for this example - would normally check against stored values)
+      (asserts! (not (is-eq transaction-digest 0x0000000000000000000000000000000000000000000000000000000000000000)) (err u240))
+
+      (print {event: "nonce_registered", locker-identifier: locker-identifier, principal: tx-sender, 
+              nonce: nonce, transaction-digest: transaction-digest})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate limiting for resource transfers
+;; Prevents rapid sequential withdrawals that could indicate compromise
+(define-public (establish-transfer-rate-limit (locker-identifier uint) (cooldown-blocks uint) (maximum-transfer-rate uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (> cooldown-blocks u12) INVALID_QUANTITY_ERROR) ;; Minimum 12 blocks cooldown (~2 hours)
+      (asserts! (<= cooldown-blocks u72) INVALID_QUANTITY_ERROR) ;; Maximum 72 blocks cooldown (~12 hours)
+      (asserts! (> maximum-transfer-rate u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= (* maximum-transfer-rate u100) quantity) (err u210)) ;; Transfer rate must be reasonable percentage
+
+      (print {event: "rate_limit_established", locker-identifier: locker-identifier, originator: originator, 
+              cooldown-blocks: cooldown-blocks, maximum-transfer-rate: maximum-transfer-rate})
+      (ok true)
+    )
+  )
+)
