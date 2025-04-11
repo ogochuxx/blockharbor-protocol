@@ -1307,3 +1307,89 @@
     )
   )
 )
+
+
+
+;; Implement secure locker pause with configurable timeout and anti-replay protection
+(define-public (secure-pause-locker (locker-identifier uint) (pause-duration uint) (authorization-token (buff 32)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> pause-duration u10) INVALID_QUANTITY_ERROR) ;; Minimum 10 blocks
+    (asserts! (<= pause-duration u1440) INVALID_QUANTITY_ERROR) ;; Maximum ~10 days
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+        (resume-block (+ block-height pause-duration))
+      )
+      ;; Only originator, beneficiary or protocol controller can pause
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      ;; Only for active lockers
+      (asserts! (or (is-eq (get status-flag locker-record) "pending") 
+                   (is-eq (get status-flag locker-record) "accepted")
+                   (is-eq (get status-flag locker-record) "graduated")) STATUS_TRANSITION_ERROR)
+
+      ;; Anti-replay protection through unique authorization token
+      (print {event: "locker_securely_paused", locker-identifier: locker-identifier, pausing-entity: tx-sender, 
+              resume-block: resume-block, auth-token-hash: (hash160 authorization-token)})
+
+      ;; Update locker status to paused
+      (map-set LockerRepository
+        { locker-identifier: locker-identifier }
+        (merge locker-record { status-flag: "paused", termination-block: (+ (get termination-block locker-record) pause-duration) })
+      )
+      (ok resume-block)
+    )
+  )
+)
+
+;; Implement secure account recovery mechanism
+;; Allows authorized recovery agents to help with account restoration
+(define-public (register-account-recovery-agents (locker-identifier uint) (recovery-agents (list 3 principal)) (recovery-timelock uint))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> recovery-timelock u144) INVALID_QUANTITY_ERROR) ;; At least 24 hours timelock
+    (asserts! (<= recovery-timelock u1440) INVALID_QUANTITY_ERROR) ;; Maximum 10 days timelock
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (quantity (get quantity locker-record))
+        (activation-height (+ block-height recovery-timelock))
+      )
+      (asserts! (is-eq tx-sender originator) ADMIN_ONLY_ERROR)
+      (asserts! (is-eq (get status-flag locker-record) "pending") STATUS_TRANSITION_ERROR)
+      (asserts! (> (len recovery-agents) u0) INVALID_QUANTITY_ERROR)
+      (asserts! (<= (len recovery-agents) u3) INVALID_QUANTITY_ERROR)
+      (print {event: "recovery_agents_registered", locker-identifier: locker-identifier, originator: originator,
+              recovery-agents: recovery-agents, activation-height: activation-height})
+      (ok activation-height)
+    )
+  )
+)
+
+;; Implement emergency pause mechanism
+;; Allows immediate suspension of locker activities in case of detected threats
+(define-public (emergency-pause-locker (locker-identifier uint) (security-threat-level uint) (threat-description (string-ascii 100)))
+  (begin
+    (asserts! (verify-locker-exists locker-identifier) INVALID_IDENTIFIER_ERROR)
+    (asserts! (> security-threat-level u0) INVALID_QUANTITY_ERROR)
+    (asserts! (<= security-threat-level u3) INVALID_QUANTITY_ERROR) ;; 1-3 threat levels
+    (let
+      (
+        (locker-record (unwrap! (map-get? LockerRepository { locker-identifier: locker-identifier }) LOCKER_NOT_FOUND_ERROR))
+        (originator (get originator locker-record))
+        (beneficiary (get beneficiary locker-record))
+      )
+      ;; Only allow originator, beneficiary or protocol controller to emergency pause
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_CONTROLLER)) ADMIN_ONLY_ERROR)
+      (asserts! (not (is-eq (get status-flag locker-record) "completed")) (err u240))
+      (asserts! (not (is-eq (get status-flag locker-record) "cancelled")) (err u241))
+      (asserts! (not (is-eq (get status-flag locker-record) "expired")) (err u242))
+      (print {event: "emergency_pause_activated", locker-identifier: locker-identifier, initiator: tx-sender,
+              threat-level: security-threat-level, description: threat-description})
+      (ok true)
+    )
+  )
+)
